@@ -1,0 +1,93 @@
+// Package sdk — контракт между ядром sitecms и плагином.
+//
+// Плагин — папка с Go-файлами одного пакета (имя пакета = имя папки), где
+// есть функция
+//
+//	func Init(api sdk.API) error
+//
+// Ядро читает папку интерпретатором Yaegi при старте и по кнопке «Перечитать»
+// в разделе «Плагины», вызывает Init один раз и дальше зовёт то, что плагин
+// зарегистрировал: обработчики адресов и перехватчики корзины. Компилировать
+// ничего не нужно: положили папку — плагин работает.
+//
+// Плагину доступна стандартная библиотека Go и этот пакет. Сторонних модулей
+// внутри плагина нет: их некому скачать и собрать.
+package sdk
+
+import (
+	"context"
+	"html/template"
+	"net/http"
+)
+
+// API — то, что ядро даёт плагину в Init. Всё зарегистрированное живёт до
+// следующего перечитывания плагинов.
+type API interface {
+	// Name — имя плагина, оно же имя папки.
+	Name() string
+
+	// DB — база магазина. Свои таблицы плагин заводит сам в Init
+	// («create table if not exists …»), имена начинает с имени плагина:
+	// promo_codes, а не codes. Чужие таблицы не трогает — их схема меняется
+	// без предупреждения.
+	DB() DB
+
+	// Menu добавляет пункт в меню админки. href — адрес внутри плагина,
+	// от «/»: Menu("Промокоды", "/") ведёт на GET /{$} плагина.
+	Menu(label, href string)
+
+	// Handle регистрирует обработчик по шаблону http.ServeMux: «GET /{$}»,
+	// «POST /new», «POST /{id}/delete». Адреса плагина живут под
+	// /admin/x/<имя>/ и открыты только вошедшему в админку.
+	Handle(pattern string, h http.HandlerFunc)
+
+	// Path — полный адрес маршрута плагина для ссылок и форм: Path("/new")
+	// → «/admin/x/promo/new».
+	Path(href string) string
+
+	// Page рисует страницу плагина в обёртке админки: меню, шапка, подвал.
+	// body — готовая разметка; собирать её удобно html/template из stdlib.
+	Page(w http.ResponseWriter, r *http.Request, title string, body template.HTML)
+
+	// OnCart подписывает перехватчик корзины. Ядро зовёт его всякий раз,
+	// когда считает корзину — на странице корзины и при оформлении заказа.
+	// Перехватчик правит Discount и Notes, остальное только читает.
+	OnCart(fn func(ctx context.Context, c *Cart))
+
+	// Money — копейки в строку для покупателя: 123456 → «1 234,56 ₽».
+	Money(kopecks int64) string
+}
+
+// DB — доступ к базе без database/sql: строки приходят готовыми картами.
+// Плейсхолдеры — $1, $2, как в Postgres.
+type DB interface {
+	Exec(ctx context.Context, query string, args ...any) error
+	Query(ctx context.Context, query string, args ...any) ([]map[string]any, error)
+}
+
+// Cart — корзина покупателя на входе в перехватчик. Суммы в копейках.
+type Cart struct {
+	Items    []CartItem
+	Code     string   // промокод, который ввёл покупатель; пусто — не вводил
+	Subtotal int64    // сумма товаров до скидок
+	Discount int64    // скидка: перехватчики прибавляют сюда
+	Notes    []string // пояснения покупателю: «Промокод SALE10: −1 000 ₽»
+}
+
+type CartItem struct {
+	ProductID int64
+	Name      string
+	Price     int64
+	Qty       int
+}
+
+func (i CartItem) Sum() int64 { return i.Price * int64(i.Qty) }
+
+// Total — к оплате. Ниже нуля не бывает: два щедрых плагина не сделают
+// магазин должником.
+func (c *Cart) Total() int64 {
+	if c.Discount >= c.Subtotal {
+		return 0
+	}
+	return c.Subtotal - c.Discount
+}
