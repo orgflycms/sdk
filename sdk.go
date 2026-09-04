@@ -20,6 +20,7 @@ package sdk
 import (
 	"context"
 	"html/template"
+	"math"
 	"net/http"
 )
 
@@ -79,12 +80,14 @@ type Cart struct {
 
 type CartItem struct {
 	ProductID int64
-	Name      string
+	OfferID   int64  // торговое предложение (SKU) товара ProductID: размер, цвет
+	Name      string // «Футболка (TS-M)» — у товара с одним предложением просто название
 	Price     int64
-	Qty       int
+	Qty       float64 // штуки, килограммы, метры — по единице товара; шаг задаёт магазин
 }
 
-func (i CartItem) Sum() int64 { return i.Price * int64(i.Qty) }
+// Sum — стоимость строки в копейках, округлённая до копейки: 0,3 м × 990 ₽ = 297 ₽.
+func (i CartItem) Sum() int64 { return int64(math.Round(float64(i.Price) * i.Qty)) }
 
 // Total — к оплате. Ниже нуля не бывает: два щедрых плагина не сделают
 // магазин должником.
