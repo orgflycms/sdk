@@ -7,7 +7,7 @@ import (
 	"html/template"
 	"net/http"
 
-	"github.com/sitecms/sdk"
+	"github.com/orgflycms/sdk"
 )
 
 func Init(api sdk.API) error {
