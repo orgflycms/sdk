@@ -138,8 +138,12 @@ type API interface {
 	// и по порядку номеров: ошибка, паника или 15 с без ответа — повтор
 	// того же события позже (через минуту, потом реже, до трёх суток).
 	// Повтор приходит с тем же OrderEvent.ID — обработчик должен быть
-	// готов к нему. Нужна группа orders:read в plugin.json, иначе плагин
-	// не загрузится. Появился в v0.4.0.
+	// готов к нему. Вызовы идут по одному: следующий — только когда
+	// прошлый вернулся, даже если он пережил свой срок. Событие, на котором
+	// плагин ошибается трое суток, пропускается — это видно на странице
+	// плагина. Нужна группа orders:read в plugin.json, иначе плагин не
+	// загрузится; владелец выключил её — события ждут, пока не включит.
+	// Появился в v0.4.0.
 	OnOrder(fn func(ctx context.Context, e *OrderEvent) error)
 }
 
@@ -511,7 +515,7 @@ const (
 type OrderEvent struct {
 	ID         int64     // номер события: растёт; повтор приходит с тем же
 	Kind       string    // OrderCreated, OrderStatus или OrderPaid
-	Status     string    // статус после события: new, paid, done, canceled или свой код магазина
+	Status     string    // статус после события: new, paid, done, cancelled или свой код магазина
 	PrevStatus string    // у OrderStatus — прежний; иначе пусто
 	At         time.Time // когда случилось, в поясе дат админки
 	// Order — заказ, каким он стал к моменту доставки события: если с тех
@@ -533,16 +537,37 @@ type Order struct {
 	Subtotal, Discount, DeliveryTotal, Total, PaidTotal int64
 	PromoCode, Note                                     string
 	// Values — все поля формы заказа по коду поля, текстом, как у Payer.Values.
-	Values   map[string]string
+	Values map[string]string
+	// Fields — те же поля снимком оформления, по порядку формы: код, роль и
+	// сырое значение. Коды полей у каждого магазина свои — что поле значит,
+	// говорит Role. Поле удалили после заказа — его ответ остался здесь.
+	Fields []OrderField
+	// Items — строки в порядке заказа. Комплект — строка с ценой и под ней
+	// строки состава с ParentID и нулевыми суммами: деньги — у строк с
+	// ParentID 0, вес и размеры — у строк, у которых нет своих вложенных.
 	Items    []OrderItem
 	Delivery OrderDelivery
 	Payment  OrderPayment
 }
 
-// OrderItem — строка заказа. Вес и размеры — одной единицы, из каталога
-// на момент доставки события.
+// OrderField — ответ покупателя на поле формы заказа, снимком оформления.
+type OrderField struct {
+	Code  string // код поля в магазине
+	Name  string // подпись поля
+	Role  string // name, phone, email, location, zip, address, pickup_point, comment, company, inn, kpp; пусто — без роли
+	Value string // сырое: номер варианта, номер местоположения, дата ISO
+	Text  string // как видит покупатель
+}
+
+// OrderItem — строка заказа снимком оформления: название, цена, вес и
+// размеры одной единицы, внешние коды — какими были при покупке, даже если
+// товар потом изменили или удалили (тогда ProductID и OfferID — 0).
 type OrderItem struct {
+	ID                          int64 // номер строки заказа
+	ParentID                    int64 // строка комплекта, в который входит эта; 0 — своя строка
 	ProductID, OfferID          int64
+	ProductExternal             string // внешний код товара (CatalogProduct.External); бывает пустым
+	OfferExternal               string // внешний код предложения (CatalogOffer.External); бывает пустым
 	Name, Article, Unit         string
 	Qty                         float64
 	Price, Discount, Sum        int64
@@ -550,7 +575,8 @@ type OrderItem struct {
 	LengthMM, WidthMM, HeightMM int
 }
 
-// OrderDelivery — доставка заказа.
+// OrderDelivery — доставка заказа. Куда — из полей формы по ролям, как их
+// получил Quote при оформлении.
 type OrderDelivery struct {
 	MethodID int64
 	Name     string
@@ -560,6 +586,11 @@ type OrderDelivery struct {
 	// Settings — настройки способа, только если Handler — обработчик
 	// этого плагина; иначе nil.
 	Settings map[string]string
+
+	Place       Place  // поле с ролью «Местоположение»; ID 0 — не было или удалено из справочника
+	Zip         string // поле с ролью «Индекс»
+	Address     string // поле с ролью «Адрес»
+	PickupPoint string // поле с ролью «Пункт выдачи»
 }
 
 // OrderPayment — способ оплаты заказа.
