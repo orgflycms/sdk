@@ -22,30 +22,55 @@
 ## Что доступно плагину
 
 Плагин исполняется интерпретатором внутри процесса магазина и получает не
-всю стандартную библиотеку, а явный список: пакет `sdk` и 62 пакета ниже, в
+всю стандартную библиотеку, а явный список: пакет `sdk` и пакеты ниже, в
 каждом — проверенные имена, а не всё подряд. Импорт другого пакета — ошибка
 загрузки «пакет … запрещён в песочнице плагина»; имя, которого нет в
 списке, — тоже ошибка загрузки. Обе видны в разделе «Плагины». Свои файлы
 плагин импортирует только из своей папки.
 
 ```text
-bufio  bytes  compress/flate  compress/gzip  compress/zlib
-container/heap  container/list  context
+archive/zip  bufio  bytes  cmp  compress/flate  compress/gzip  compress/zlib
+container/heap  container/list  container/ring  context
 crypto  crypto/aes  crypto/cipher  crypto/ecdh  crypto/ecdsa  crypto/ed25519
 crypto/elliptic  crypto/hmac  crypto/md5  crypto/rand  crypto/rsa  crypto/sha1
 crypto/sha256  crypto/sha512  crypto/subtle  crypto/tls  crypto/x509
 crypto/x509/pkix
-encoding  encoding/base32  encoding/base64  encoding/binary  encoding/csv
+encoding  encoding/asn1  encoding/base32  encoding/base64  encoding/binary  encoding/csv
 encoding/hex  encoding/json  encoding/pem  encoding/xml
 errors  fmt  hash  hash/adler32  hash/crc32  hash/crc64  hash/fnv  hash/maphash
-html  html/template  io  math  math/big  math/bits  math/rand/v2
-mime/quotedprintable  net/http  net/url  path  regexp  sort  strconv  strings
-sync  time  unicode/utf16  unicode/utf8
+html  html/template  image  image/color  image/draw  image/jpeg  image/png
+io  math  math/big  math/bits  math/cmplx  math/rand/v2
+mime  mime/multipart  mime/quotedprintable  net/http  net/mail  net/netip
+net/textproto  net/url  path  regexp  slices  sort  strconv  strings
+sync  sync/atomic  text/tabwriter  text/template  time  unicode
+unicode/utf16  unicode/utf8
 ```
 
 Интерпретатор знает таблицу стандартной библиотеки **Go 1.22**: функций,
 появившихся в Go 1.23 и позже, у плагина нет. `go build` с `go 1.27` из
 `go.mod` их пропустит — проверяйте плагин загрузкой в магазин.
+
+`slices` и `cmp` исполняются из встроенных generic-исходников Yaegi.
+Открыты только `slices.Contains`, `slices.Index`, `slices.Equal`,
+`slices.Clone`, `cmp.Compare`, `cmp.Less`. Для `slices.Equal[[]int, int]` и
+`slices.Clone[[]int, int]` нужны явные параметры типа. Остальные имена,
+включая `Insert`, `Replace`, `Sort`, `SortFunc`, `Max` и `cmp.Or`, закрыты
+при проверке исходника плагина: некоторые операции Yaegi дают неверный
+результат без ошибки. Псевдонимы импорта поддерживаются; точечный импорт
+этих двух пакетов запрещён. `maps` закрыт из-за ошибок Yaegi.
+
+`text/template` работает только со строками и не экранирует XML: XML-фиды
+собирайте через `encoding/xml`. `archive/zip` читает из `io.ReaderAt` и
+пишет в `io.Writer`, без открытия файлов по имени. Распаковывайте содержимое
+через `io.LimitReader`; перед декодированием картинки проверяйте размеры
+через `image.DecodeConfig`. Память плагина отдельным пределом не ограничена.
+
+Форму с файлом читайте потоково через `r.MultipartReader()` и
+`NextPart`/`NextRawPart`, затем `io.LimitReader(part, предел)`: временные
+файлы не создаются. Предел тела запроса админки остаётся 1 МиБ.
+`unicode` даёт функции и константы без общих таблиц; `net/mail` только
+разбирает письма и адреса. Для своего цвета используйте
+`image.NewUniform(color.Black)`, для счётчиков — `sync/atomic` без unsafe.
 
 Интерпретатор — не компилятор Go, у него есть свои ошибки. Известная
 ловушка: **не присваивайте нескольким полям структуры одним оператором**
@@ -55,11 +80,11 @@ sync  time  unicode/utf16  unicode/utf8
 ### Чего нет и почему
 
 - **Файлов, процессов, окружения**: `os` и его подпакеты, `os/exec`,
-  `syscall`, `io/fs`, `io/ioutil`, `path/filepath`, `embed`, `archive/*`,
-  `mime/multipart`, `database/sql` (база — через `api.DB()`). Плагин живёт в
+  `syscall`, `io/fs`, `io/ioutil`, `path/filepath`, `embed`, `archive/tar`,
+  `database/sql` (база — через `api.DB()`). Плагин живёт в
   процессе магазина: через файлы ему достались бы ключи и настройки, через
   процессы — сервер целиком.
-- **Сети, кроме клиента HTTP(S)**: `net`, `net/smtp`, `net/mail`,
+- **Сети, кроме клиента HTTP(S)**: `net`, `net/smtp`,
   `net/rpc`, `net/http/*` (`httptest`, `httputil`, `cookiejar`),
   `tls.Dial` и `tls.Listen`. Своих серверов и сокетов у плагина нет: адреса
   он получает через `api.Handle`.
@@ -67,10 +92,24 @@ sync  time  unicode/utf16  unicode/utf8
   `plugin`, `go/*`, `debug/*`, `testing`, `expvar`.
 - **Журнала**: `log` и `log/slog` закрыты, `fmt.Print*` пишет в никуда.
   Показать что-то владельцу можно на своей странице в админке.
-- **Прочего, чего нет в списке**, даже безобидного: `slices`, `maps`,
-  `cmp`, `unicode` (есть `unicode/utf8` и `unicode/utf16`), `text/template`
-  (есть `html/template`), `math/rand` (есть `math/rand/v2`). Пакет
-  открывается только правкой ядра магазина.
+- **Прочего, чего нет в списке**, даже безобидного: `maps`, `iter`,
+  `math/rand` (есть `math/rand/v2`), `encoding/gob`, `image/gif`,
+  `image/color/palette`. Пакет открывается только правкой ядра магазина.
+- **Файловых методов и общих реестров**: `mime.TypeByExtension`,
+  `ExtensionsByType`, `AddExtensionType`; `zip.OpenReader`, `ReadCloser`,
+  пакетные `RegisterCompressor`/`RegisterDecompressor`; `multipart.ReadForm`,
+  `Form`, `FileHeader`, `File`; `Request.ParseMultipartForm` и `FormFile`;
+  `text/template.ParseFiles`, `ParseGlob`, `ParseFS` и одноимённые методы.
+  Методы шаблонов `Clone`, `New`, `Lookup`, `Templates` возвращают ту же
+  безопасную обёртку. У `zip.Reader` и `zip.Writer` собственные реестры доступны.
+- **Общих изменяемых таблиц**: `unicode.Cyrillic`, `Categories`, `Scripts`,
+  `TurkishCase` и прочих таблиц Unicode, `image.Black`, `White`, `Transparent`,
+  `Opaque`, `image.RegisterFormat`, `xml.HTMLAutoClose`, `xml.HTMLEntity`,
+  `asn1.NullBytes` (используйте `[]byte{5, 0}`), `http.ErrNotSupported`,
+  `crc32.IEEETable`. `crc32.MakeTable` и `crc64.MakeTable` возвращают свои
+  копии таблиц: их можно менять без влияния на ядро и другие плагины.
+  `net/textproto` ограничен `CanonicalMIMEHeaderKey` и `MIMEHeader`;
+  `atomic.Pointer`, функции для указателей и `Uintptr` закрыты.
 - Внутри разрешённых пакетов убрано немногое: `crypto/rand.Reader` (есть
   `rand.Read`), `crypto.RegisterHash`, `time.LoadLocation` и `time.Local`
   (часовой пояс — `time.FixedZone`, `time.UTC` или
