@@ -10,8 +10,9 @@
 //
 // Ядро читает папку интерпретатором Yaegi при старте и по кнопке «Перечитать»
 // в разделе «Плагины», вызывает Init один раз и дальше зовёт то, что плагин
-// зарегистрировал: обработчики адресов, перехватчики корзины и обработчики
-// оплаты. Компилировать ничего не нужно: положили папку — плагин работает.
+// зарегистрировал: обработчики адресов, перехватчики корзины, обработчики
+// оплаты и доставки, открытые адреса и подписчики событий заказов.
+// Компилировать ничего не нужно: положили папку — плагин работает.
 //
 // Плагину доступны этот пакет и часть стандартной библиотеки Go: список и
 // запреты (файлы, процессы, сокеты) — в README.md. Сторонних модулей внутри
@@ -98,6 +99,48 @@ type API interface {
 	// решает автор. Плагин видит только свой ключ. Метод появился позже
 	// остальных: на старом ядре плагин, который его зовёт, не загрузится.
 	License() PluginLicense
+
+	// RegisterDelivery добавляет обработчик доставки. В админке он
+	// появляется в списке «Обработчик» способа доставки как
+	// «<плагин>/<code>» (vitams.cdek/door): владелец заводит способ (или
+	// профиль службы), выбирает обработчик и заполняет вкладку «Настройки»
+	// полями h.Settings. Правила code, Title и полей — как у
+	// RegisterPayment; без Quote плагин не загружается.
+	//
+	// Цену считает обработчик, а в заказ её пишет ядро: поверх ответа
+	// действуют «Бесплатно от» и ограничения способа. Метод появился в
+	// v0.4.0: на старом ядре плагин, который его зовёт, не загрузится.
+	RegisterDelivery(code string, h DeliveryHandler)
+
+	// HandlePublic регистрирует открытый адрес: без входа в админку, под
+	// /x/<имя>/ — для обмена с 1С, вебхуков CRM, фидов маркетплейсов.
+	// Шаблон — как у Handle. Проверка (пароль, подпись, Basic) — дело
+	// плагина: ядро пускает всех. Куки в запрос не приходят и из ответа
+	// выбрасываются; тело — не больше 8 МиБ; ответ — текст, JSON, XML,
+	// CSV, PDF или картинка, но не HTML. Появился в v0.4.0.
+	HandlePublic(pattern string, h http.HandlerFunc)
+
+	// PublicURL — полный адрес открытого маршрута, чтобы показать его
+	// владельцу: PublicURL("/exchange") →
+	// «https://shop.ru/x/vitams.onec/exchange». Пока в настройках магазина
+	// не задан «Адрес магазина» — только путь. Появился в v0.4.0.
+	PublicURL(href string) string
+
+	// Catalog — запись в каталог через ядро: товары, предложения, цены,
+	// остатки по внешнему коду. Нужна группа catalog:write в plugin.json и
+	// согласие владельца; без них каждый метод возвращает ошибку. Лимит
+	// товаров бесплатной версии и пересчёт цен и остатков товара держит
+	// ядро. Появился в v0.4.0.
+	Catalog() Catalog
+
+	// OnOrder подписывает плагин на события заказов: создан, сменился
+	// статус, оплачен полностью. Ядро доставляет каждое событие хотя бы раз
+	// и по порядку номеров: ошибка, паника или 15 с без ответа — повтор
+	// того же события позже (через минуту, потом реже, до трёх суток).
+	// Повтор приходит с тем же OrderEvent.ID — обработчик должен быть
+	// готов к нему. Нужна группа orders:read в plugin.json, иначе плагин
+	// не загрузится. Появился в v0.4.0.
+	OnOrder(fn func(ctx context.Context, e *OrderEvent) error)
 }
 
 // Статусы ключа плагина — PluginLicense.Status.
@@ -341,4 +384,187 @@ func (c *Cart) Total() int64 {
 		return 0
 	}
 	return c.Subtotal - c.Discount
+}
+
+// DeliveryHandler — обработчик доставки: СДЭК, Почта России. Quote зовётся
+// параллельно из расчётов оформления разных покупателей. Паника стоит
+// одного вызова: способ просто не показывается.
+type DeliveryHandler struct {
+	// Title — название в списке обработчиков админки: «СДЭК: до двери».
+	Title string
+	// Settings — поля вкладки «Настройки» способа доставки. У профиля
+	// службы значения берутся от службы, поверх — свои у профиля.
+	Settings []Field
+
+	// Quote — цена и срок для корзины покупателя. Обязателен. Контекст —
+	// 5 с: дольше покупатель форму не ждёт. Ядро запоминает ответ на
+	// 10 минут для тех же строк, суммы, места, адреса и настроек, ошибку —
+	// на минуту: пересчёт формы не идёт к перевозчику каждый раз.
+	//
+	// Ошибка — способ не показывается, текст уходит в журнал магазина,
+	// покупатель его не видит. Цены ещё нет (не указан город) — верните
+	// DeliveryQuote.Missing.
+	Quote func(ctx context.Context, r *DeliveryRequest) (DeliveryQuote, error)
+}
+
+// DeliveryRequest — что известно о заказе на форме оформления. Суммы — в
+// копейках, вес — в граммах, размеры — в миллиметрах.
+type DeliveryRequest struct {
+	MethodID  int64             // способ доставки (профиль) в магазине
+	Settings  map[string]string // настройки способа, секреты тоже
+	Items     []DeliveryItem
+	Goods     int64  // сумма товаров со скидкой — объявленная ценность
+	WeightG   int    // вес всей корзины; товары без веса — нулём
+	PayerType string // код типа плательщика: individual, company
+
+	Place       Place  // местоположение из формы; ID 0 — не выбрано
+	Zip         string // поле с ролью «Индекс»
+	Address     string // поле с ролью «Адрес»: улица, дом, квартира
+	PickupPoint string // поле с ролью «Пункт выдачи»: код или адрес пункта
+}
+
+// DeliveryItem — строка корзины для расчёта. Вес и размеры — одной единицы
+// товара; 0 — магазин их не указал.
+type DeliveryItem struct {
+	ProductID, OfferID          int64
+	Name                        string
+	Qty                         float64
+	Price                       int64 // за единицу до скидки
+	WeightG                     int
+	LengthMM, WidthMM, HeightMM int
+}
+
+// Place — местоположение из справочника магазина.
+type Place struct {
+	ID   int64
+	Name string   // «Екатеринбург»
+	Path []string // от страны: «Россия», «Свердловская область», «Екатеринбург»
+	Code string   // внешний код, как его завёл магазин: ФИАС, КЛАДР, ISO; бывает пустым
+}
+
+// DeliveryQuote — ответ Quote.
+type DeliveryQuote struct {
+	Price int64 // цена для покупателя до «Бесплатно от» способа
+	// MinDays, MaxDays — срок в днях; оба 0 — срок из настроек способа.
+	MinDays, MaxDays int
+	// Missing — цены пока нет: «Укажите город». Способ показан с этим
+	// текстом вместо цены, оформить заказ с ним нельзя. Price тогда не
+	// смотрится.
+	Missing string
+}
+
+// Catalog — запись в каталог от имени плагина (API.Catalog). Внешний код —
+// GUID 1С, id МойСклад: у товара это «Ключ товара» импорта CSV, так что
+// файл и плагин правят одни и те же товары. Каждый вызов — своя
+// транзакция; ошибка ничего не меняет.
+type Catalog interface {
+	// Product — товар по внешнему коду; ok=false — такого нет.
+	Product(ctx context.Context, external string) (p CatalogProduct, ok bool, err error)
+	// SaveProduct создаёт или обновляет товар по p.External и возвращает
+	// его номер. Новый товар сверх лимита бесплатной версии — ошибка с
+	// текстом для владельца. Предложений не заводит: товар без них не
+	// продаётся.
+	SaveProduct(ctx context.Context, p CatalogProduct) (int64, error)
+	// SaveOffer создаёт или обновляет предложение по o.External у товара
+	// o.Product. Первое предложение товара становится основным.
+	SaveOffer(ctx context.Context, o CatalogOffer) (int64, error)
+	// SetPrice — цена и зачёркнутая цена предложения, копейки; old 0 —
+	// без зачёркнутой.
+	SetPrice(ctx context.Context, offer string, price, old int64) error
+	// SetStock — сколько физически лежит на складе по умолчанию; резервы
+	// заказов магазин вычтет сам.
+	SetStock(ctx context.Context, offer string, qty float64) error
+}
+
+// CatalogProduct — товар. SaveProduct пишет все поля, кроме ID.
+type CatalogProduct struct {
+	ID          int64  // номер в магазине; в SaveProduct не читается
+	External    string // внешний код, обязателен, до 200 знаков
+	Name        string // обязательно
+	Section     string // путь раздела «Одежда/Футболки»: недостающие разделы заводятся; пусто — без раздела
+	Unit        string // «шт», «кг» — как в справочнике единиц; пусто — штуки
+	Description string // HTML описания, как в форме товара
+	Active      bool
+}
+
+// CatalogOffer — предложение (размер, цвет) товара. SaveOffer пишет все поля.
+type CatalogOffer struct {
+	Product                     string // внешний код товара
+	External                    string // внешний код предложения, обязателен; у 1С — «товар#характеристика»
+	SKU                         string // артикул
+	Barcode                     string
+	Price                       int64 // копейки
+	OldPrice                    int64
+	WeightG                     int
+	LengthMM, WidthMM, HeightMM int
+	Active                      bool
+}
+
+// Виды событий заказа — OrderEvent.Kind.
+const (
+	OrderCreated = "created" // заказ оформлен
+	OrderStatus  = "status"  // сменился статус: Status, PrevStatus
+	OrderPaid    = "paid"    // оплачен полностью; у заказа на 0 ₽ не бывает
+)
+
+// OrderEvent — событие заказа для OnOrder.
+type OrderEvent struct {
+	ID         int64     // номер события: растёт; повтор приходит с тем же
+	Kind       string    // OrderCreated, OrderStatus или OrderPaid
+	Status     string    // статус после события: new, paid, done, canceled или свой код магазина
+	PrevStatus string    // у OrderStatus — прежний; иначе пусто
+	At         time.Time // когда случилось, в поясе дат админки
+	// Order — заказ, каким он стал к моменту доставки события: если с тех
+	// пор статус сменился ещё раз, Order.Status уже новый, а Status события
+	// — тот, что был.
+	Order Order
+}
+
+// Order — заказ глазами плагина. Суммы — в копейках.
+type Order struct {
+	ID                                                  int64
+	Status                                              string
+	Created                                             time.Time // в поясе дат админки
+	CustomerID                                          int64     // 0 — гость
+	PayerType                                           string
+	Customer                                            string // контакты из формы заказа
+	Phone                                               string
+	Email                                               string
+	Subtotal, Discount, DeliveryTotal, Total, PaidTotal int64
+	PromoCode, Note                                     string
+	// Values — все поля формы заказа по коду поля, текстом, как у Payer.Values.
+	Values   map[string]string
+	Items    []OrderItem
+	Delivery OrderDelivery
+	Payment  OrderPayment
+}
+
+// OrderItem — строка заказа. Вес и размеры — одной единицы, из каталога
+// на момент доставки события.
+type OrderItem struct {
+	ProductID, OfferID          int64
+	Name, Article, Unit         string
+	Qty                         float64
+	Price, Discount, Sum        int64
+	WeightG                     int
+	LengthMM, WidthMM, HeightMM int
+}
+
+// OrderDelivery — доставка заказа.
+type OrderDelivery struct {
+	MethodID int64
+	Name     string
+	Handler  string // fixed, pickup или «<плагин>/<код>»
+	Price    int64  // взято с покупателя
+	StoreID  int64  // склад самовывоза; 0 — нет
+	// Settings — настройки способа, только если Handler — обработчик
+	// этого плагина; иначе nil.
+	Settings map[string]string
+}
+
+// OrderPayment — способ оплаты заказа.
+type OrderPayment struct {
+	MethodID int64
+	Name     string
+	Handler  string // manual или «<плагин>/<код>»
 }
