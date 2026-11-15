@@ -589,11 +589,12 @@ type OrderItem struct {
 type OrderDelivery struct {
 	MethodID int64
 	Name     string
-	Handler  string // fixed, pickup или «<плагин>/<код>»
+	Handler  string // fixed, pickup или «<плагин>/<код>» — какой выбрал покупатель, даже если способ потом сменили
 	Price    int64  // взято с покупателя
 	StoreID  int64  // склад самовывоза; 0 — нет
-	// Settings — настройки способа, только если Handler — обработчик
-	// этого плагина; иначе nil.
+	// Settings — настройки способа сейчас, только если Handler — обработчик
+	// этого плагина и у способа он же; способ удалили или сменили ему
+	// службу — nil.
 	Settings map[string]string
 
 	Place       Place  // поле с ролью «Местоположение»; ID 0 — не было или удалено из справочника
