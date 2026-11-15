@@ -91,6 +91,31 @@ type API interface {
 	// кириллицей — для счетов, актов, накладных. Ошибка — неверная таблица,
 	// больше 100 страниц или больше 1 МиБ текста.
 	PDF(doc Doc) ([]byte, error)
+
+	// License — ключ этого плагина в магазине (платный плагин из
+	// маркетплейса): ядро проверило подпись без сети и сверило домен.
+	// Плагин без ключа работает всегда — что ограничить без ключа,
+	// решает автор. Плагин видит только свой ключ. Метод появился позже
+	// остальных: на старом ядре плагин, который его зовёт, не загрузится.
+	License() PluginLicense
+}
+
+// Статусы ключа плагина — PluginLicense.Status.
+const (
+	LicenseNone        = "none"         // ключа нет
+	LicenseValid       = "valid"        // подпись верна, домен магазина тот же
+	LicenseWrongDomain = "wrong_domain" // ключ выпущен для другого домена
+	LicenseBroken      = "broken"       // не разбирается или подпись не сходится
+)
+
+// PluginLicense — ключ плагина, как его видит ядро. «Обновления закончились»
+// — не статус: ключ действует, просто новые версии после UpdatesUntil сайт
+// по нему не отдаёт.
+type PluginLicense struct {
+	Status       string    // LicenseNone, LicenseValid, LicenseWrongDomain или LicenseBroken
+	Domain       string    // домен из ключа; пусто у none и broken
+	UpdatesUntil time.Time // до какого дня выдаются обновления; ноль у none и broken
+	Key          string    // сам ключ — для сервера автора; пусто у none и broken
 }
 
 // PaymentHandler — обработчик оплаты. Функции зовутся параллельно — из
